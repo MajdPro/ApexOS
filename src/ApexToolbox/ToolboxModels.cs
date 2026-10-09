@@ -14,6 +14,7 @@ internal sealed class ToolboxAction
     public string Title { get; init; } = "";
     public string Description { get; init; } = "";
     public string Script { get; init; } = "";
+    public string RiskTier { get; init; } = "";
     public string ApplyText { get; init; } = "Apply";
     public string RestoreText { get; init; } = "Restore";
     public List<string> StatusArgs { get; init; } = [];

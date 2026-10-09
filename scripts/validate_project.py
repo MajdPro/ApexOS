@@ -39,6 +39,11 @@ for action in config.get("actions", []):
     for field in ("category", "title", "description", "script", "statusArgs", "applyArgs", "restoreArgs", "requiresAdmin"):
         if field not in action:
             errors.append(f"Action {key} missing {field}")
+    risk_tier = action.get("riskTier", "").upper()
+    if risk_tier and risk_tier not in {"SAFE", "ADVANCED", "EXPERIMENTAL"}:
+        errors.append(f"Action {key} has invalid risk tier: {risk_tier}")
+    if risk_tier == "EXPERIMENTAL" and not action.get("requiresConfirmation", False):
+        errors.append(f"Experimental action {key} must require confirmation")
     script = pathlib.PurePosixPath(action.get("script", ""))
     if script.is_absolute() or ".." in script.parts:
         errors.append(f"Unsafe script path on {key}: {script}")

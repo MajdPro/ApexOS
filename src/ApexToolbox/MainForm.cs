@@ -10,6 +10,14 @@ namespace ApexToolbox;
 internal sealed class MainForm : Form
 {
     private sealed record DriverInventoryEntry(string Name, string Manufacturer, string DeviceClass, string Provider, string Version, string Date, string Status, string Details, string SearchText);
+    private sealed record StartupEntry(string Name, string RegistryView, string Command)
+    {
+        public string Display => $"{Name} ({RegistryView})";
+    }
+    private sealed record PowerPlanEntry(string Guid, string Name, bool Active)
+    {
+        public string Display => $"{Name} ({Guid})";
+    }
 
     private static readonly (string Label, string Category, string Glyph)[] Sections =
     [
@@ -46,6 +54,13 @@ internal sealed class MainForm : Form
     private readonly Dictionary<string, List<Control>> _actionCards = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, Lazy<Task<ScriptResult>>> _statusReads = new(StringComparer.Ordinal);
     private readonly List<DriverInventoryEntry> _driverInventory = [];
+    private Panel? _startupPanel;
+    private ComboBox? _startupChoice;
+    private Label? _startupCommandDetails;
+    private readonly List<StartupEntry> _startupInventory = [];
+    private Panel? _powerPlanPanel;
+    private ComboBox? _powerPlanChoice;
+    private readonly List<PowerPlanEntry> _powerPlanInventory = [];
     private FlowLayoutPanel _activePage = new();
     private Control? _wallpaperCard;
     private DataGridView? _driverGrid;
@@ -410,6 +425,8 @@ internal sealed class MainForm : Form
             RenderHomeAsync(_pageViews["HOME"]),
             LoadDriverInventoryAsync()
         };
+        if (_startupPanel is not null) tasks.Add(LoadStartupInventoryAsync());
+        if (_powerPlanPanel is not null) tasks.Add(LoadPowerPlanInventoryAsync());
         var wallpaperAction = _config.Actions.FirstOrDefault(action => action.Id == "wallpaper-browser");
         if (wallpaperAction is not null && _wallpaperCard is not null)
             tasks.Add(RefreshWallpaperListAsync(wallpaperAction, _wallpaperCard));
@@ -649,6 +666,16 @@ internal sealed class MainForm : Form
             _actions.Controls.Add(CreateSecurityShortcuts());
         if (category == "Drivers")
             _actions.Controls.Add(CreateDriverInventoryPanel());
+        if (category == "Startup")
+        {
+            _startupPanel = CreateStartupManagerPanel();
+            _actions.Controls.Add(_startupPanel);
+        }
+        if (category == "Power")
+        {
+            _powerPlanPanel = CreatePowerPlanPickerPanel();
+            _actions.Controls.Add(_powerPlanPanel);
+        }
         if (actions.Count == 0)
         {
             if (_actions.Controls.Count > 0) return;
@@ -658,7 +685,7 @@ internal sealed class MainForm : Form
             _actions.Controls.Add(page);
             return;
         }
-        foreach (var action in actions.Where(action => category != "Drivers" || action.Id != "driver-list"))
+        foreach (var action in actions.Where(action => (category != "Drivers" || action.Id != "driver-list") && (category != "Startup" || action.Id != "startup-disable-entry") && (category != "Power" || action.Id != "power-select-installed")))
             _actions.Controls.Add(CreateCard(action));
     }
 
@@ -669,7 +696,7 @@ internal sealed class MainForm : Form
         {
             "General Configuration" => new HashSet<string>(["windows-update-settings", "storage-settings", "background-settings", "search-index-settings", "indexing-options", "optional-apps-list", "store-status", "edge-browser-status", "webview2-status", "windows-compatibility"], StringComparer.OrdinalIgnoreCase),
             "Background Activity" => new HashSet<string>(["startup-inventory", "startup-settings", "background-settings", "search-index-settings"], StringComparer.OrdinalIgnoreCase),
-            "Startup" => new HashSet<string>(["startup-inventory", "startup-settings"], StringComparer.OrdinalIgnoreCase),
+            "Startup" => new HashSet<string>(["startup-settings", "startup-disable-entry"], StringComparer.OrdinalIgnoreCase),
             "Storage" => new HashSet<string>(["storage-settings"], StringComparer.OrdinalIgnoreCase),
             "Debloating" => new HashSet<string>(["optional-apps-list", "remove-clipchamp", "remove-bing-news", "remove-gethelp", "remove-tips", "remove-solitaire", "remove-feedback-hub", "remove-maps", "remove-movies-tv", "remove-people", "remove-teams-personal", "remove-cortana", "remove-mail-calendar", "remove-copilot-app", "store-status", "store-remove"], StringComparer.OrdinalIgnoreCase),
             "Compatibility" => new HashSet<string>(["windows-compatibility", "edge-browser-status", "webview2-status", "gaming-services-diagnose", "xbox-signin-diagnose", "winre-diagnose"], StringComparer.OrdinalIgnoreCase),
@@ -677,6 +704,194 @@ internal sealed class MainForm : Form
         };
         if (ids is not null) return _config.Actions.Where(action => ids.Contains(action.Id)).ToList();
         return configured.ToList();
+    }
+
+    private Panel CreateStartupManagerPanel()
+    {
+        var card = new Panel { Name = "startup-manager", Width = Math.Max(480, _actions.ClientSize.Width - 36), Height = 196, BackColor = SurfaceColor, Padding = new Padding(14), Margin = new Padding(0, 0, 0, 12), Tag = "card" };
+        card.Controls.Add(new Label { Text = "Current-user startup entries", Dock = DockStyle.Top, Height = 28, ForeColor = TextColor, Font = new Font("Segoe UI Semibold", 13F) });
+        card.Controls.Add(new Label { Text = "Only HKCU Run registry values are managed. Services, scheduled tasks, other accounts, and Startup-folder items are not changed.", Dock = DockStyle.Top, Height = 42, ForeColor = MutedColor });
+        _startupChoice = new ComboBox { Name = "startup-entry-choice", Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList, DisplayMember = nameof(StartupEntry.Display), BackColor = PageColor, ForeColor = TextColor };
+        _startupChoice.SelectedIndexChanged += (_, _) => UpdateStartupSelection();
+        var selectionRow = new Panel { Dock = DockStyle.Top, Height = 34 };
+        selectionRow.Controls.Add(_startupChoice);
+        var refresh = ButtonFor("Refresh", false);
+        refresh.Width = 82;
+        refresh.Dock = DockStyle.Right;
+        refresh.Click += async (_, _) => await LoadStartupInventoryAsync();
+        selectionRow.Controls.Add(refresh);
+        card.Controls.Add(selectionRow);
+        _startupCommandDetails = new Label { Name = "startup-command-details", Text = "Command: inventory loading...", Dock = DockStyle.Top, Height = 32, ForeColor = MutedColor, AutoEllipsis = true };
+        card.Controls.Add(_startupCommandDetails);
+        var statusRow = new Panel { Dock = DockStyle.Bottom, Height = 36 };
+        statusRow.Controls.Add(new Label { Name = "status", Text = "Status: loading startup entries...", Dock = DockStyle.Left, Width = 190, ForeColor = MutedColor, TextAlign = ContentAlignment.MiddleLeft });
+        var buttons = new FlowLayoutPanel { Dock = DockStyle.Right, Width = 284, FlowDirection = FlowDirection.RightToLeft, WrapContents = false };
+        var restore = ButtonFor("Restore saved", false);
+        restore.Name = "restore-button";
+        restore.Width = 118;
+        restore.Click += async (_, _) => await RunStartupRestoreAsync(card);
+        var disable = ButtonFor("Disable selected", true);
+        disable.Name = "action-button";
+        disable.Width = 132;
+        disable.Click += async (_, _) => await RunStartupDisableAsync(card);
+        buttons.Controls.AddRange([restore, disable]);
+        statusRow.Controls.Add(buttons);
+        card.Controls.Add(statusRow);
+        _toolTips.SetToolTip(refresh, "Rescan current-user startup Run registry entries.");
+        return card;
+    }
+
+    private async Task LoadStartupInventoryAsync()
+    {
+        if (_startupChoice is null) return;
+        var action = _config.Actions.FirstOrDefault(candidate => candidate.Id == "startup-inventory");
+        if (action is null) return;
+        var status = _startupPanel?.Controls.Find("status", true).FirstOrDefault() as Label;
+        try
+        {
+            var previous = _startupChoice.SelectedItem as StartupEntry;
+            var result = await ScriptRunner.RunAsync(ResolveScript(action.Script), ["-Mode", "StartupList"], false);
+            if (result.ExitCode != 0) throw new InvalidOperationException(result.StandardError.Trim());
+            using var document = JsonDocument.Parse(result.StandardOutput);
+            _startupInventory.Clear();
+            foreach (var entry in document.RootElement.EnumerateArray())
+            {
+                _startupInventory.Add(new StartupEntry(
+                    GetJsonString(entry, "Name", "Unknown"),
+                    GetJsonString(entry, "RegistryView", "Registry64"),
+                    GetJsonString(entry, "Command", "")));
+            }
+            _startupChoice.BeginUpdate();
+            _startupChoice.Items.Clear();
+            foreach (var entry in _startupInventory) _startupChoice.Items.Add(entry);
+            var restoreIndex = previous is null ? -1 : _startupInventory.FindIndex(entry => entry.Name == previous.Name && entry.RegistryView == previous.RegistryView);
+            _startupChoice.SelectedIndex = restoreIndex >= 0 ? restoreIndex : _startupInventory.Count > 0 ? 0 : -1;
+            _startupChoice.EndUpdate();
+            if (status is not null) status.Text = $"Status: {_startupInventory.Count} current-user entries";
+            UpdateStartupSelection();
+        }
+        catch (Exception exception)
+        {
+            var logPath = WriteLog("Startup Inventory", 1, exception.ToString(), "Startup");
+            if (status is not null) { status.Text = "Status: inventory failed"; status.ForeColor = Color.FromArgb(226, 124, 104); }
+            ShowNotification($"Startup inventory failed: {exception.Message} Details: {logPath}", true);
+        }
+    }
+
+    private void UpdateStartupSelection()
+    {
+        if (_startupCommandDetails is null) return;
+        _startupCommandDetails.Text = _startupChoice?.SelectedItem is StartupEntry entry
+            ? $"Command: {entry.Command}"
+            : "No current-user Run entries were found.";
+    }
+
+    private async Task RunStartupDisableAsync(Control card)
+    {
+        if (_startupChoice?.SelectedItem is not StartupEntry entry)
+        {
+            ShowNotification("Select a current-user startup entry first.", false);
+            return;
+        }
+        var action = _config.Actions.FirstOrDefault(candidate => candidate.Id == "startup-disable-entry");
+        if (action is null) { ShowNotification("Startup management is unavailable in this Toolbox build.", true); return; }
+        await RunActionAsync(action, ["-Mode", "DisableStartup", "-Name", entry.Name, "-RegistryView", entry.RegistryView], card);
+    }
+
+    private async Task RunStartupRestoreAsync(Control card)
+    {
+        var action = _config.Actions.FirstOrDefault(candidate => candidate.Id == "startup-disable-entry");
+        if (action is null) { ShowNotification("Startup management is unavailable in this Toolbox build.", true); return; }
+        await RunActionAsync(action, action.RestoreArgs, card);
+    }
+
+    private Panel CreatePowerPlanPickerPanel()
+    {
+        var card = new Panel { Name = "installed-power-plans", Width = Math.Max(480, _actions.ClientSize.Width - 36), Height = 148, BackColor = SurfaceColor, Padding = new Padding(14), Margin = new Padding(0, 0, 0, 12), Tag = "card" };
+        card.Controls.Add(new Label { Text = "Installed Windows power plans", Dock = DockStyle.Top, Height = 28, ForeColor = TextColor, Font = new Font("Segoe UI Semibold", 13F) });
+        card.Controls.Add(new Label { Text = "Plans and GUIDs are enumerated from this Windows installation. Selecting a plan does not create or rename a scheme.", Dock = DockStyle.Top, Height = 38, ForeColor = MutedColor });
+        var selectionRow = new Panel { Dock = DockStyle.Top, Height = 34 };
+        _powerPlanChoice = new ComboBox { Name = "installed-power-plan-choice", Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList, DisplayMember = nameof(PowerPlanEntry.Display), BackColor = PageColor, ForeColor = TextColor };
+        selectionRow.Controls.Add(_powerPlanChoice);
+        var refresh = ButtonFor("Refresh", false);
+        refresh.Width = 82;
+        refresh.Dock = DockStyle.Right;
+        refresh.Click += async (_, _) => await LoadPowerPlanInventoryAsync();
+        selectionRow.Controls.Add(refresh);
+        card.Controls.Add(selectionRow);
+        var statusRow = new Panel { Dock = DockStyle.Bottom, Height = 36 };
+        statusRow.Controls.Add(new Label { Name = "status", Text = "Status: loading installed plans...", Dock = DockStyle.Left, Width = 220, ForeColor = MutedColor, TextAlign = ContentAlignment.MiddleLeft });
+        var buttons = new FlowLayoutPanel { Dock = DockStyle.Right, Width = 300, FlowDirection = FlowDirection.RightToLeft, WrapContents = false };
+        var restore = ButtonFor("Restore previous", false);
+        restore.Name = "restore-button";
+        restore.Width = 126;
+        restore.Click += async (_, _) => await RunInstalledPowerPlanRestoreAsync(card);
+        var select = ButtonFor("Use selected plan", true);
+        select.Name = "action-button";
+        select.Width = 142;
+        select.Click += async (_, _) => await RunInstalledPowerPlanSelectAsync(card);
+        buttons.Controls.AddRange([restore, select]);
+        statusRow.Controls.Add(buttons);
+        card.Controls.Add(statusRow);
+        _toolTips.SetToolTip(refresh, "Rescan the installed power schemes and their current active state.");
+        return card;
+    }
+
+    private async Task LoadPowerPlanInventoryAsync()
+    {
+        if (_powerPlanChoice is null) return;
+        var action = _config.Actions.FirstOrDefault(candidate => candidate.Id == "power-select-installed");
+        if (action is null) return;
+        var status = _powerPlanPanel?.Controls.Find("status", true).FirstOrDefault() as Label;
+        try
+        {
+            var previous = _powerPlanChoice.SelectedItem as PowerPlanEntry;
+            var result = await ScriptRunner.RunAsync(ResolveScript(action.Script), ["-Mode", "List"], false);
+            if (result.ExitCode != 0) throw new InvalidOperationException(result.StandardError.Trim());
+            using var document = JsonDocument.Parse(result.StandardOutput);
+            _powerPlanInventory.Clear();
+            foreach (var plan in document.RootElement.EnumerateArray())
+            {
+                _powerPlanInventory.Add(new PowerPlanEntry(
+                    GetJsonString(plan, "Guid", ""),
+                    GetJsonString(plan, "Name", "Unknown plan"),
+                    plan.TryGetProperty("Active", out var active) && active.GetBoolean()));
+            }
+            _powerPlanChoice.BeginUpdate();
+            _powerPlanChoice.Items.Clear();
+            foreach (var plan in _powerPlanInventory) _powerPlanChoice.Items.Add(plan);
+            var selectedIndex = previous is null ? -1 : _powerPlanInventory.FindIndex(plan => plan.Guid == previous.Guid);
+            if (selectedIndex < 0) selectedIndex = _powerPlanInventory.FindIndex(plan => plan.Active);
+            _powerPlanChoice.SelectedIndex = selectedIndex;
+            _powerPlanChoice.EndUpdate();
+            var activePlan = _powerPlanInventory.FirstOrDefault(plan => plan.Active);
+            if (status is not null) status.Text = activePlan is null ? "Status: active plan unavailable" : $"Active: {activePlan.Name}";
+        }
+        catch (Exception exception)
+        {
+            var logPath = WriteLog("Installed Power Plan Inventory", 1, exception.ToString(), "Power");
+            if (status is not null) { status.Text = "Status: plan scan failed"; status.ForeColor = Color.FromArgb(226, 124, 104); }
+            ShowNotification($"Installed power plan scan failed: {exception.Message} Details: {logPath}", true);
+        }
+    }
+
+    private async Task RunInstalledPowerPlanSelectAsync(Control card)
+    {
+        if (_powerPlanChoice?.SelectedItem is not PowerPlanEntry plan)
+        {
+            ShowNotification("Select an installed Windows power plan first.", false);
+            return;
+        }
+        var action = _config.Actions.FirstOrDefault(candidate => candidate.Id == "power-select-installed");
+        if (action is null) { ShowNotification("Installed power plan selection is unavailable in this Toolbox build.", true); return; }
+        await RunActionAsync(action, ["-Mode", "SelectInstalled", "-Guid", plan.Guid], card);
+    }
+
+    private async Task RunInstalledPowerPlanRestoreAsync(Control card)
+    {
+        var action = _config.Actions.FirstOrDefault(candidate => candidate.Id == "power-select-installed");
+        if (action is null) { ShowNotification("Installed power plan restore is unavailable in this Toolbox build.", true); return; }
+        await RunActionAsync(action, action.RestoreArgs, card);
     }
 
     private Task ShowCategoryAsync(string category)
@@ -1480,10 +1695,17 @@ internal sealed class MainForm : Form
         private Control CreateCard(ToolboxAction action)
     {
             var card = new Panel { Width = Math.Max(480, _actions.ClientSize.Width - 34), Height = 168, BackColor = SurfaceColor, Margin = new Padding(0, 0, 0, 12), Padding = new Padding(16), Tag = action.Id };
-            var isAdvanced = action.RequiresConfirmation || action.RequiresAdmin;
+            var riskTier = GetRiskTier(action);
             var titleRow = new Panel { Dock = DockStyle.Top, Height = 30, BackColor = SurfaceColor };
             titleRow.Controls.Add(new Label { Text = action.Title, Dock = DockStyle.Fill, Font = new Font("Segoe UI Semibold", 12), ForeColor = TextColor, AutoEllipsis = true });
-            titleRow.Controls.Add(new Label { Text = isAdvanced ? "ADVANCED" : "SAFE", Dock = DockStyle.Right, Width = 78, TextAlign = ContentAlignment.MiddleRight, Font = new Font("Segoe UI Semibold", 8.5F), ForeColor = isAdvanced ? Color.FromArgb(226, 160, 94) : AccentColor });
+            var riskLabel = new Label { Text = riskTier, Dock = DockStyle.Right, Width = 96, TextAlign = ContentAlignment.MiddleRight, Font = new Font("Segoe UI Semibold", 8.5F), ForeColor = riskTier == "SAFE" ? AccentColor : riskTier == "EXPERIMENTAL" ? Color.FromArgb(226, 124, 104) : Color.FromArgb(226, 160, 94) };
+            titleRow.Controls.Add(riskLabel);
+            _toolTips.SetToolTip(riskLabel, riskTier switch
+            {
+                "EXPERIMENTAL" => "EXPERIMENTAL: requires a separate confirmation before every apply operation and may have uncertain system effects.",
+                "ADVANCED" => "ADVANCED: review the action description and recovery implications before applying.",
+                _ => "SAFE: designed to preserve normal Windows functionality. Review the action description before applying."
+            });
             card.Controls.Add(titleRow);
         card.Controls.Add(new Label { Text = action.Description, Dock = DockStyle.Top, Height = 48, ForeColor = MutedColor });
         var details = new TextBox { Name = "action-details", Dock = DockStyle.Bottom, Height = 92, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Visible = false, BorderStyle = BorderStyle.FixedSingle, BackColor = PageColor, ForeColor = MutedColor, Font = new Font("Consolas", 8.5F) };
@@ -1623,12 +1845,17 @@ internal sealed class MainForm : Form
             ShowNotification("This action is unavailable on the current Windows version.", true);
             return;
         }
-        if (action.RequiresConfirmation && ReferenceEquals(arguments, action.ApplyArgs))
+        var isApply = MatchesActionMode(arguments, action.ApplyArgs);
+        var isRestore = MatchesActionMode(arguments, action.RestoreArgs);
+        if ((action.RequiresConfirmation || GetRiskTier(action) == "EXPERIMENTAL") && isApply)
         {
-            var choice = MessageBox.Show(this, $"{action.Description}\n\nContinue?", action.Title, MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+            var tierWarning = GetRiskTier(action) == "EXPERIMENTAL"
+                ? "\n\nEXPERIMENTAL: this operation can have uncertain system effects. Apply only after reviewing a backup and recovery plan."
+                : "";
+            var choice = MessageBox.Show(this, $"{action.Description}{tierWarning}\n\nContinue?", action.Title, MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
             if (choice != DialogResult.Yes) return;
         }
-        if (action.OfferRestorePoint && ReferenceEquals(arguments, action.ApplyArgs))
+        if (action.OfferRestorePoint && isApply)
         {
             var choice = MessageBox.Show(this, "Create a Windows restore point before this change? Choose No to continue without one, or Cancel to stop.", action.Title, MessageBoxButtons.YesNoCancel, MessageBoxIcon.Warning);
             if (choice == DialogResult.Cancel) return;
@@ -1658,7 +1885,6 @@ internal sealed class MainForm : Form
             var result = await ScriptRunner.RunAsync(ResolveScript(action.Script), arguments, action.RequiresAdmin);
             var detail = $"STDOUT:\n{result.StandardOutput}\nSTDERR:\n{result.StandardError}";
             var logPath = WriteLog($"{action.Title} | {action.Script}", result.ExitCode, detail, action.Category);
-            var isRestore = arguments.SequenceEqual(action.RestoreArgs, StringComparer.OrdinalIgnoreCase);
             var applyLabel = isRestore
                 ? (string.IsNullOrWhiteSpace(action.RestoreText) ? "Restore" : action.RestoreText.Trim())
                 : (string.IsNullOrWhiteSpace(action.ApplyText) ? "Apply" : action.ApplyText.Trim());
@@ -1700,6 +1926,7 @@ internal sealed class MainForm : Form
                 : restartRequired ? $"{action.Title} request was accepted. Restart Windows before checking connectivity."
                 : isLockScreenRequest ? "Windows accepted the lock-screen assignment and returned an active image stream; it does not expose the active source path for exact-file verification."
                 : $"{action.Title}: {successVerb.ToLowerInvariant()} successfully.", result.ExitCode != 0 || restartRequired);
+            if (action.Id == "power-select-installed") await LoadPowerPlanInventoryAsync();
             if (result.ExitCode == 0 && action.Category == "Drivers")
             {
                 if (action.Id == "driver-list") await LoadDriverInventoryAsync(result, logPath);
@@ -1713,8 +1940,12 @@ internal sealed class MainForm : Form
             }
             else if (result.ExitCode == 0 && !restartRequired)
             {
-                if (action.Id == "wallpaper-browser" && !isLockScreenRequest) await RefreshWallpaperStatusAsync(action, card);
-                else await RefreshStatusAsync(action, card, true);
+                if (action.Id == "startup-disable-entry") await LoadStartupInventoryAsync();
+                else if (action.Id != "power-select-installed")
+                {
+                    if (action.Id == "wallpaper-browser" && !isLockScreenRequest) await RefreshWallpaperStatusAsync(action, card);
+                    else await RefreshStatusAsync(action, card, true);
+                }
             }
             if (actionButton is not null && !actionButton.IsDisposed)
             {
@@ -1736,6 +1967,22 @@ internal sealed class MainForm : Form
             card.Enabled = true;
             SetActionProgress(card, false);
         }
+    }
+
+    private static string GetRiskTier(ToolboxAction action)
+    {
+        var configured = action.RiskTier.Trim().ToUpperInvariant();
+        if (configured is "SAFE" or "ADVANCED" or "EXPERIMENTAL") return configured;
+        return action.RequiresConfirmation || action.RequiresAdmin ? "ADVANCED" : "SAFE";
+    }
+
+    private static bool MatchesActionMode(IReadOnlyList<string> arguments, IReadOnlyList<string> configuredArguments)
+    {
+        if (configuredArguments.Count == 0) return false;
+        if (arguments.SequenceEqual(configuredArguments, StringComparer.OrdinalIgnoreCase)) return true;
+        return configuredArguments.Count >= 2 && arguments.Count >= 2 &&
+            arguments[0].Equals(configuredArguments[0], StringComparison.OrdinalIgnoreCase) &&
+            arguments[1].Equals(configuredArguments[1], StringComparison.OrdinalIgnoreCase);
     }
 
     private void UpdateActionDetails(Control card, ToolboxAction action, IReadOnlyList<string> arguments, int exitCode, string stdout, string stderr, string logPath)

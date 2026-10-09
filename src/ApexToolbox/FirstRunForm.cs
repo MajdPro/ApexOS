@@ -57,6 +57,7 @@ internal sealed class FirstRunForm : Form
                 .ToArray()
             : [];
         _wallpaper = Choice(new[] { "None" }.Concat(availableWallpapers).ToArray());
+        _browser.SelectedIndex = 1;
         var defaultWallpaper = Array.FindIndex(availableWallpapers, name => string.Equals(name, "Apex-Default-Dark.jpg", StringComparison.OrdinalIgnoreCase));
         if (defaultWallpaper >= 0) _wallpaper.SelectedIndex = defaultWallpaper + 1;
 

@@ -1,6 +1,7 @@
 param(
-    [ValidateSet('Status','Select','Restore','Diagnose','UseAvailable')][string]$Mode='Status',
-    [string]$Name='Apex Performance'
+    [ValidateSet('Status','List','Select','SelectInstalled','Restore','Diagnose','UseAvailable')][string]$Mode='Status',
+    [string]$Name='Apex Performance',
+    [string]$Guid
 )
 $ErrorActionPreference='Stop'
 Import-Module (Join-Path $PSScriptRoot '..\Modules\Apex.Common.psm1') -Force
@@ -158,6 +159,12 @@ try {
     $profiles=Get-ProfileMap -Plans $plans
     $deviceType=Get-ApexDeviceType
 
+    if($Mode -eq 'List'){
+        ConvertTo-Json -InputObject @($plans) -Depth 4 -Compress
+        $null=Write-ApexLog -Action 'Installed Power Plan Inventory' -Result 'Complete' -Message "Plans=$($plans.Count); Active=$($active.Name); ActiveGuid=$($active.Guid)"
+        exit 0
+    }
+
     if($Mode -eq 'Status'){
         if($Name -and $Name -in $apexPlans){
             $guid=$profiles[$Name]
@@ -208,6 +215,19 @@ try {
         }else{$verified=$active}
         $log=Write-ApexLog -Action 'Use Available Power Plan' -Result 'Success' -Message "Guid=$($verified.Guid); Name=$($verified.Name)"
         [pscustomobject]@{Result='Success';Message='Using an already-installed Windows plan; no unsupported plan was created.';ActivePlan=$verified.Name;ActiveGuid=$verified.Guid;Log=$log}|ConvertTo-Json -Depth 3
+        exit 0
+    }
+
+    if($Mode -eq 'SelectInstalled'){
+        $selected=Get-PlanByGuid -Guid $Guid
+        if(-not $selected){throw "Power plan GUID '$Guid' is not currently installed. Refresh the plan list and choose an available scheme."}
+        $previousGuid=if($state -and $state.PreviousGuid){[string]$state.PreviousGuid}else{$active.Guid}
+        Save-PlanState -Path $statePath -PreviousGuid $previousGuid -Profiles $profiles
+        Invoke-PowerCfg @('/setactive',$selected.Guid)|Out-Null
+        $verified=Get-ActivePlan
+        if($verified.Guid -ne $selected.Guid){throw "Windows did not activate installed plan '$($selected.Name)' ($($selected.Guid))."}
+        $log=Write-ApexLog -Action 'Select Installed Power Plan' -Result 'Success' -Message "Guid=$($verified.Guid); Name=$($verified.Name); PreviousGuid=$previousGuid"
+        [pscustomobject]@{Result='Success';ActivePlan=$verified.Name;ActiveGuid=$verified.Guid;Log=$log}|ConvertTo-Json -Depth 4
         exit 0
     }
 
